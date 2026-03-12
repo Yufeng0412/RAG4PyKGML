@@ -16,3 +16,10 @@ class ConfigAgentState(TypedDict, total=False):
     output: str
     generated_code: Optional[str]
     user_input: str  # latest user message for this turn
+    # Stage 2: layers (step-by-step)
+    layers_phase: Optional[str]  # "intro" | "name" | "spec" | "continue"
+    current_layer_name: Optional[str]  # name of layer being added
+    # Stage 3: forward (step-by-step)
+    forward_phase: Optional[str]  # "intro" | "step" | "continue"
+    forward_steps: List[dict]  # list of {layer_name, inputs, output_name, hidden_name}
+    forward_valid: Optional[bool]  # set by validate_forward: True -> generate_code, False -> show error

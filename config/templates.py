@@ -1,6 +1,9 @@
 """Configuration templates and required fields for PyKGML config agent."""
 
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
+
+# Step-by-step: ask for each init_param separately (order preserved)
+INIT_PARAM_SUBFIELDS = ["input_dim", "hidden_dim", "num_layers", "output_dim", "dropout"]
 
 
 def get_model_structure_template() -> Dict[str, Any]:
@@ -28,7 +31,7 @@ def get_required_fields(script_type: str) -> Dict[str, List[str]]:
     if script_type == "model_structure":
         return {
             "top_level": ["init_params", "layers", "forward"],
-            "init_params": ["input_dim", "hidden_dim", "num_layers", "output_dim"],
+            "init_params": INIT_PARAM_SUBFIELDS,
             "layers": [],
             "forward": [],
         }
@@ -42,11 +45,26 @@ def get_required_fields(script_type: str) -> Dict[str, List[str]]:
     return {}
 
 
-def get_next_missing_field(script_type: str, config: Dict[str, Any]) -> str | None:
+def _layers_valid(val: Any) -> bool:
+    """True if config['layers'] is a valid non-empty layers dict (layer_name -> tuple)."""
+    if not isinstance(val, dict) or len(val) == 0:
+        return False
+    init_param_keys = {"input_dim", "hidden_dim", "num_layers", "output_dim", "dropout"}
+    if set(val.keys()) <= init_param_keys:
+        return False
+    return any(isinstance(v, (list, tuple)) for v in val.values())
+
+
+def get_next_missing_field(
+    script_type: str,
+    config: Dict[str, Any],
+    state: Optional[Dict[str, Any]] = None,
+) -> str | None:
     """
-    Return the next field name to ask for (from top_level order), or None if complete.
-    Does not drill into nested keys; we treat init_params/layers/forward as single steps.
+    Return the next field name to ask for. For init_params returns subfields one by one.
+    For layers/forward uses state (layers_phase, forward_phase) for step-by-step flow.
     """
+    state = state or {}
     required = get_required_fields(script_type)
     if not required:
         return None
@@ -54,14 +72,33 @@ def get_next_missing_field(script_type: str, config: Dict[str, Any]) -> str | No
     for field in top:
         val = config.get(field)
         if field == "init_params" and script_type == "model_structure":
-            sub = required.get("init_params", [])
             if not isinstance(val, dict):
-                return field
-            for k in sub:
+                return "init_params.input_dim"
+            for k in INIT_PARAM_SUBFIELDS:
                 if k not in val or val[k] is None:
-                    return field
+                    return f"init_params.{k}"
+        elif field == "layers" and script_type == "model_structure":
+            if _layers_valid(val):
+                continue
+            layers_phase = state.get("layers_phase")
+            if layers_phase == "name":
+                return "layers.name"
+            if layers_phase == "spec":
+                return "layers.spec"
+            if layers_phase == "continue":
+                return "layers.continue"
+            return "layers"
+        elif field == "forward" and script_type == "model_structure":
+            if isinstance(val, dict) and len(val) > 0:
+                continue
+            forward_phase = state.get("forward_phase")
+            if forward_phase == "step":
+                return "forward.step"
+            if forward_phase == "continue":
+                return "forward.continue"
+            return "forward"
         elif field == "layers":
-            if not isinstance(val, dict) or len(val) == 0:
+            if not _layers_valid(val):
                 return field
         elif field == "forward":
             if not isinstance(val, dict) or len(val) == 0:
@@ -78,6 +115,8 @@ def get_next_missing_field(script_type: str, config: Dict[str, Any]) -> str | No
     return None
 
 
-def is_config_complete(script_type: str, config: Dict[str, Any]) -> bool:
+def is_config_complete(
+    script_type: str, config: Dict[str, Any], state: Optional[Dict[str, Any]] = None
+) -> bool:
     """True if all required fields are filled."""
-    return get_next_missing_field(script_type, config) is None
+    return get_next_missing_field(script_type, config, state) is None

@@ -118,6 +118,24 @@ def add_message(msg_stream, history):
 #     return history, gr.Textbox(value="", interactive=False)
 
 # in gradio >=4.0, each message must be one of {"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}
+# In Gradio 6, content can be a list of blocks: [{"text": "...", "type": "text"}, ...]
+def content_to_text(content):
+    """Extract plain text from message content (string or list of blocks)."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict):
+                parts.append(block.get("text", block.get("content", str(block))))
+            else:
+                parts.append(str(block))
+        return " ".join(parts).strip()
+    return str(content).strip()
+
+
 def add_text(history, text):
     history = history + [{"role": "user", "content": text}]
     return history, gr.Textbox(value="", interactive=False)
@@ -151,88 +169,134 @@ def debug_stream_call(chain, input_data, chain_name="chain"):
     print("=== END DEBUG ===\n")
 
     
-# Global state for config generator
-config_generator_state = {}
-
 def rag_bot(history):
     """Bot for RAG chain - handles general questions"""
     if not history or "content" not in history[-1]:
-        print("⚠️ WARNING: 'content' key missing, initializing")
         if history:
-            history[-1]["content"] = ""
+            history[-1]["content"] = history[-1].get("content", "")
         else:
             return
 
-    user_msg = history[-1]["content"]
+    user_msg = content_to_text(history[-1]["content"])
     msg_stream = rag_chain.stream(user_msg)
     for history, buffer, is_error in add_message(msg_stream, history):
         yield history
 
 
-def config_bot(history):
-    """Bot for Config Generator - handles configuration script generation"""
-    global config_generator_state
-    
+def _show_init_params_form(state):
+    """True when agent is asking for init_params (step-by-step)."""
+    if not isinstance(state, dict):
+        return False
+    cur = state.get("current_field") or ""
+    nxt = state.get("next_field") or ""
+    return cur.startswith("init_params.") or nxt.startswith("init_params.")
+
+
+def _visibility_from_state(state):
+    """From config state, return (show_init, show_layers_start, show_layers_continue, show_forward_start, show_forward_continue)."""
+    if not isinstance(state, dict):
+        return False, False, False, False, False
+    cur = (state.get("current_field") or "").strip()
+    nxt = (state.get("next_field") or "").strip()
+    show_init = _show_init_params_form(state)
+    show_layers_start = (cur == "layers" or nxt == "layers") and not (cur.startswith("layers.") or nxt.startswith("layers."))
+    show_layers_continue = cur == "layers.continue" or nxt == "layers.continue"
+    show_forward_start = (cur == "forward" or nxt == "forward") and not (cur.startswith("forward.") or nxt.startswith("forward."))
+    show_forward_continue = cur == "forward.continue" or nxt == "forward.continue"
+    return show_init, show_layers_start, show_layers_continue, show_forward_start, show_forward_continue
+
+
+def _update_stage_visibility(state):
+    """Return gr.update(visible=...) for init_params row, init inputs row, layers start, layers continue, forward start, forward continue."""
+    a, b, c, d, e = _visibility_from_state(state)
+    return (
+        gr.update(visible=a), gr.update(visible=a),
+        gr.update(visible=b), gr.update(visible=c),
+        gr.update(visible=d), gr.update(visible=e),
+    )
+
+
+def config_bot(history, config_state):
+    """Bot for Config Generator. config_state is passed in/out so it persists across requests (gr.State)."""
     if not history or "content" not in history[-1]:
-        print("⚠️ WARNING: 'content' key missing, initializing")
         if history:
-            history[-1]["content"] = ""
+            history[-1]["content"] = history[-1].get("content", "")
         else:
-            return
-    
-    user_msg = history[-1]["content"]
-    
-    # Prepare input with state
-    input_data = {
-        "input": user_msg,
-        "state": config_generator_state
-    }
-    
+            return history, config_state or {}
+
+    user_msg = content_to_text(history[-1].get("content"))
+    config_state = config_state if isinstance(config_state, dict) else {}
+
+    input_data = {"input": user_msg, "state": config_state}
+
     try:
-        # Call config generator chain
-        result = chains_dict['config_generator'].invoke(input_data)
-        
-        # Handle response format
-        if isinstance(result, dict):
-            # Update state
-            if "state" in result:
-                config_generator_state.update(result["state"])
-            
-            # Get output
-            output = result.get("output", "")
-            
-            # Add assistant message
-            if not history or history[-1]["role"] != "assistant":
-                history.append({"role": "assistant", "content": output})
-            else:
-                history[-1]["content"] = output
-            
-            # If complete, show config
-            if result.get("complete"):
-                config = result.get("config", {})
-                if config:
-                    import json
-                    config_str = "\n\n**Configuration Script:**\n```python\n" + json.dumps(config, indent=2) + "\n```"
-                    history[-1]["content"] += config_str
-        else:
-            # Fallback for non-dict response
+        result = chains_dict["config_generator"].invoke(input_data)
+        if not isinstance(result, dict):
             output = str(result)
             if not history or history[-1]["role"] != "assistant":
                 history.append({"role": "assistant", "content": output})
             else:
                 history[-1]["content"] = output
-        
-        yield history
-        
+            if "state" in result:
+                config_state = dict(result["state"])
+            return history, config_state
+
+        if "state" in result:
+            config_state = dict(result["state"])
+
+        output = result.get("output", "")
+        if not history or history[-1]["role"] != "assistant":
+            history.append({"role": "assistant", "content": output})
+        else:
+            history[-1]["content"] = output
+
+        return history, config_state
+
     except Exception as e:
         logger.error(f"Config generator error: {get_traceback(e)}")
-        error_msg = f"⚠️ Error: {str(e)}"
+        err = f"⚠️ Error: {str(e)}"
         if not history or history[-1]["role"] != "assistant":
-            history.append({"role": "assistant", "content": error_msg})
+            history.append({"role": "assistant", "content": err})
         else:
-            history[-1]["content"] = error_msg
-        yield history
+            history[-1]["content"] = err
+        return history, config_state
 
+
+def submit_init_params_form(history, config_state, input_dim, hidden_dim, num_layers, output_dim, dropout):
+    """Build init_params from form fields, add as user message, call config bot, return (history, state)."""
+    config_state = config_state if isinstance(config_state, dict) else {}
+    parts = []
+    if input_dim is not None and str(input_dim).strip() != "":
+        parts.append(f"input_dim={input_dim}")
+    if hidden_dim is not None and str(hidden_dim).strip() != "":
+        parts.append(f"hidden_dim={hidden_dim}")
+    if num_layers is not None and str(num_layers).strip() != "":
+        parts.append(f"num_layers={num_layers}")
+    if output_dim is not None and str(output_dim).strip() != "":
+        parts.append(f"output_dim={output_dim}")
+    if dropout is not None and str(dropout).strip() != "":
+        parts.append(f"dropout={dropout}")
+    if not parts:
+        return history, config_state
+    user_msg = ", ".join(parts)
+    history = history + [{"role": "user", "content": user_msg}]
+    input_data = {"input": user_msg, "state": config_state}
+    try:
+        result = chains_dict["config_generator"].invoke(input_data)
+        if not isinstance(result, dict):
+            output = str(result)
+            history.append({"role": "assistant", "content": output})
+            config_state = result.get("state", config_state)
+            return history, dict(config_state) if isinstance(config_state, dict) else config_state
+        if "state" in result:
+            config_state = dict(result["state"])
+        output = result.get("output", "")
+        history.append({"role": "assistant", "content": output})
+        return history, config_state
+    except Exception as e:
+        logger.error(f"Config generator error: {get_traceback(e)}")
+        history.append({"role": "assistant", "content": f"⚠️ Error: {str(e)}"})
+        return history, config_state
 
 
 #####################################################################
@@ -319,13 +383,14 @@ THEME = gr.themes.Default(primary_hue="green")
 def get_demo():
     with gr.Blocks() as demo:
         gr.Markdown("# PyKGML Assistant - Dual Chat Interface")
-        gr.Markdown("### Ask general questions on the left, generate configuration scripts on the right")
+        # gr.Markdown("### Ask general questions on the left, generate configuration scripts on the right")
         
         with gr.Row():
             # Left column: RAG Chatbot
             with gr.Column(scale=1):
                 gr.Markdown("## 📚 RAG Chatbot")
-                gr.Markdown("Ask general questions about PyKGML")
+                gr.Markdown("Ask general questions on the left.")
+                gr.Markdown("For example: how to use the model structure configuration in PyKGML?")
                 rag_chatbot = gr.Chatbot(
                     value=[],
                     elem_id="rag_chatbot",
@@ -356,35 +421,70 @@ def get_demo():
                 gr.Markdown("## ⚙️ Config Generator")
                 gr.Markdown("Generate PyKGML model structure or loss function configurations")
                 with gr.Row():
-                    btn_model = gr.Button("I want to create a model structure", variant="secondary")
-                    btn_loss = gr.Button("I want to create a loss function", variant="secondary")
+                    btn_model = gr.Button("Create a new model structure", variant="secondary")
+                    btn_loss = gr.Button("Create a new loss function", variant="secondary")
                 config_chatbot = gr.Chatbot(
                     value=[],
                     elem_id="config_chatbot",
                     label="Config Generator",
                     avatar_images=(None, (os.path.join(os.path.dirname(__file__), "parrot.png"))),
-                    height=450,
+                    height=380,
                 )
+                # Step-by-step init_params form (visible when agent asks for init_params)
+                with gr.Row(visible=False) as init_params_row:
+                    gr.Markdown("**Initial parameters** (fill any subset and submit):")
+                with gr.Row(visible=False) as init_params_inputs_row:
+                    input_dim_in = gr.Number(label="input_dim", value=None, precision=0, min_width=80)
+                    hidden_dim_in = gr.Number(label="hidden_dim", value=None, precision=0, min_width=80)
+                    num_layers_in = gr.Number(label="num_layers", value=None, precision=0, min_width=80)
+                    output_dim_in = gr.Number(label="output_dim", value=None, precision=0, min_width=80)
+                    dropout_in = gr.Number(label="dropout", value=None, precision=2, min_width=80)
+                    btn_submit_init = gr.Button("Submit init params", variant="primary")
+                # Stage 2: Layers — Start / Continue / Complete
+                with gr.Row(visible=False) as layers_start_row:
+                    btn_start_layers = gr.Button("Start Building Layers", variant="primary")
+                with gr.Row(visible=False) as layers_continue_row:
+                    btn_continue_layers = gr.Button("Continue Adding More Layers", variant="secondary")
+                    btn_complete_layers = gr.Button("Complete", variant="primary")
+                # Stage 3: Forward — Start / Continue / Complete
+                with gr.Row(visible=False) as forward_start_row:
+                    btn_start_forward = gr.Button("Start Building Forward Function", variant="primary")
+                with gr.Row(visible=False) as forward_continue_row:
+                    btn_continue_forward = gr.Button("Continue Adding Layer Calls", variant="secondary")
+                    btn_complete_forward = gr.Button("Complete", variant="primary")
+                config_state = gr.State(value={})  # Persist config agent state across requests
                 config_txt = gr.Textbox(
                     show_label=False,
                     placeholder="Or type your choice / answer the bot's questions here...",
                     container=False,
                 )
-                
+
+                stage_rows = [init_params_row, init_params_inputs_row, layers_start_row, layers_continue_row, forward_start_row, forward_continue_row]
+
                 btn_model.click(
                     fn=lambda h: (h + [{"role": "user", "content": "I want to create a model structure"}], ""),
                     inputs=[config_chatbot],
                     outputs=[config_chatbot, config_txt],
                     queue=False,
-                ).then(config_bot, [config_chatbot], [config_chatbot])
-                
+                ).then(
+                    config_bot, [config_chatbot, config_state], [config_chatbot, config_state]
+                ).then(
+                    _update_stage_visibility,
+                    [config_state],
+                    stage_rows,
+                )
+
                 btn_loss.click(
                     fn=lambda h: (h + [{"role": "user", "content": "I want to create a loss function"}], ""),
                     inputs=[config_chatbot],
                     outputs=[config_chatbot, config_txt],
                     queue=False,
-                ).then(config_bot, [config_chatbot], [config_chatbot])
-                
+                ).then(config_bot, [config_chatbot, config_state], [config_chatbot, config_state]).then(
+                    _update_stage_visibility,
+                    [config_state],
+                    stage_rows,
+                )
+
                 # Config generator chatbot event handlers (text submit)
                 config_txt_msg = (
                     config_txt.submit(
@@ -393,9 +493,38 @@ def get_demo():
                         outputs=[config_chatbot, config_txt],
                         queue=False
                     )
-                    .then(config_bot, [config_chatbot], [config_chatbot])
+                    .then(config_bot, [config_chatbot, config_state], [config_chatbot, config_state])
+                    .then(_update_stage_visibility, [config_state], stage_rows)
                     .then(lambda: gr.Textbox(interactive=True), None, [config_txt], queue=False)
                 )
+
+                # Submit init params form
+                btn_submit_init.click(
+                    fn=submit_init_params_form,
+                    inputs=[
+                        config_chatbot, config_state,
+                        input_dim_in, hidden_dim_in, num_layers_in, output_dim_in, dropout_in,
+                    ],
+                    outputs=[config_chatbot, config_state],
+                ).then(_update_stage_visibility, [config_state], stage_rows)
+
+                # Stage 2 & 3: Layers / Forward button clicks — add user message and run config_bot
+                for btn, msg in [
+                    (btn_start_layers, "Start Building Layers"),
+                    (btn_continue_layers, "Continue Adding More Layers"),
+                    (btn_complete_layers, "Complete"),
+                    (btn_start_forward, "Start Building Forward Function"),
+                    (btn_continue_forward, "Continue Adding Layer Calls"),
+                    (btn_complete_forward, "Complete"),
+                ]:
+                    btn.click(
+                        fn=lambda h, s, m=msg: (h + [{"role": "user", "content": m}], s),
+                        inputs=[config_chatbot, config_state],
+                        outputs=[config_chatbot, config_state],
+                        queue=False,
+                    ).then(config_bot, [config_chatbot, config_state], [config_chatbot, config_state]).then(
+                        _update_stage_visibility, [config_state], stage_rows
+                    )
 
     return demo
 

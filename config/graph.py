@@ -18,16 +18,19 @@ def create_config_graph(llm: Any):
     # Nodes (bind llm)
     builder.add_node("receive", lambda s: nodes.receive(s, llm=llm))
     builder.add_node("select_script_type", lambda s: nodes.select_script_type(s, llm=llm))
+    builder.add_node("start_layers", lambda s: nodes.start_layers(s, llm=llm))
+    builder.add_node("start_forward", lambda s: nodes.start_forward(s, llm=llm))
     builder.add_node("extract", lambda s: nodes.extract(s, llm=llm))
     builder.add_node("decide_next", lambda s: nodes.decide_next(s, llm=llm))
     builder.add_node("ask_question", lambda s: nodes.ask_question(s, llm=llm))
     builder.add_node("confirm", lambda s: nodes.confirm(s, llm=llm))
+    builder.add_node("validate_forward", lambda s: nodes.validate_forward(s, llm=llm))
     builder.add_node("generate_code", lambda s: nodes.generate_code(s, llm=llm))
 
     # Entry
     builder.add_edge(START, "receive")
 
-    # Receive -> route to select_script_type | confirm | extract | decide_next
+    # Receive -> route to select_script_type | confirm | extract | start_layers | start_forward | decide_next
     builder.add_conditional_edges(
         "receive",
         nodes.route_after_receive,
@@ -35,9 +38,14 @@ def create_config_graph(llm: Any):
             "select_script_type": "select_script_type",
             "confirm": "confirm",
             "extract": "extract",
+            "start_layers": "start_layers",
+            "start_forward": "start_forward",
             "decide_next": "decide_next",
         },
     )
+
+    builder.add_edge("start_layers", END)
+    builder.add_edge("start_forward", END)
 
     # select_script_type already set output and current_field -> end
     builder.add_edge("select_script_type", END)
@@ -58,10 +66,17 @@ def create_config_graph(llm: Any):
 
     builder.add_edge("ask_question", END)
 
-    # confirm -> generate_code or END
+    # confirm -> validate_forward (when user said yes) or END
     builder.add_conditional_edges(
         "confirm",
         nodes.route_after_confirm,
+        {"validate_forward": "validate_forward", "__end__": END},
+    )
+
+    # validate_forward -> generate_code (if dimensions OK) or END (with error message)
+    builder.add_conditional_edges(
+        "validate_forward",
+        nodes.route_after_validate,
         {"generate_code": "generate_code", "__end__": END},
     )
 

@@ -1,6 +1,15 @@
 """
 One-turn runner for the LangGraph config agent.
-Use from a server or script: pass current state + user message, get back output and updated state.
+
+This module is not used inside the config_LangGraph package; it is intended for
+the server (e.g. agent_server_app.py) or any script that wants to run one
+user turn and get back a server-friendly result: output, state, complete, generated_code.
+
+Usage:
+    from config_LangGraph import create_config_graph, run_one_turn
+    graph = create_config_graph(llm)
+    result = run_one_turn(graph, user_message, previous_state)
+    # result["output"], result["state"], result["complete"], result["generated_code"]
 """
 
 from typing import Any, Dict
@@ -38,6 +47,10 @@ def run_one_turn(
         "current_field": state.get("current_field"),
         "complete": state.get("complete", False),
         "needs_confirmation": state.get("needs_confirmation", False),
+        "layers_phase": state.get("layers_phase"),
+        "current_layer_name": state.get("current_layer_name"),
+        "forward_phase": state.get("forward_phase"),
+        "forward_steps": state.get("forward_steps", []),
     }
     result = graph.invoke(invoke_state)
     output = result.get("output", "")
