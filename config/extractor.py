@@ -154,6 +154,73 @@ def extract_value_for_field(
                 return float(num), True
         return None, False
 
+    # Loss function fields (before generic dict parse)
+    if field_name == "loss_fn.variable":
+        kv = parse_forward_step_pairs(user_input)
+        if not kv:
+            return None, False
+        lk = {str(k).strip().lower(): v for k, v in kv.items()}
+        name = str(lk.get("name", "")).strip()
+        vtype = str(lk.get("type", "")).strip().lower()
+        idx_raw = lk.get("index")
+        idx = None
+        if idx_raw is not None:
+            try:
+                idx = int(str(idx_raw).strip())
+            except (TypeError, ValueError):
+                pass
+        rev_raw = lk.get("reverse", "no")
+        if isinstance(rev_raw, bool):
+            reverse = rev_raw
+        else:
+            reverse = str(rev_raw).strip().lower() in ("yes", "true", "1", "y", "on")
+        if name and vtype and idx is not None:
+            return {"name": name, "type": vtype, "index": idx, "reverse": reverse}, True
+        return None, False
+
+    if field_name == "loss_fn.var_continue":
+        low = (user_input or "").strip().lower()
+        if "proceed" in low or ("loss" in low and "function" in low) or "step 3" in low:
+            return "proceed", True
+        if "another" in low or "add" in low:
+            return "add_another", True
+        return None, False
+
+    if field_name == "loss_fn.loss_term":
+        text = (user_input or "").strip()
+        if not text:
+            return None, False
+        # Form payload format: "name=loss1 || expr=... || final=yes"
+        if "||" in text:
+            parts = [p.strip() for p in text.split("||") if p.strip()]
+            payload = {}
+            for part in parts:
+                if "=" not in part:
+                    continue
+                k, _, v = part.partition("=")
+                payload[k.strip().lower()] = v.strip()
+            expr = payload.get("expr", "")
+            if not expr:
+                return None, False
+            out = {"expr": expr}
+            if payload.get("name"):
+                out["key"] = payload["name"]
+            if "final" in payload:
+                out["is_final"] = payload["final"].strip().lower() in ("yes", "y", "true", "1", "on")
+            return out, True
+        if "=" in text and text.split("=", 1)[0].strip().startswith("loss"):
+            k, _, rest = text.partition("=")
+            return {"key": k.strip(), "expr": rest.strip()}, True
+        return {"expr": text}, True
+
+    if field_name == "loss_fn.loss_continue":
+        low = (user_input or "").strip().lower()
+        if "finalize" in low or ("final" in low and "loss" in low) or low in ("done", "complete"):
+            return "finalize", True
+        if "another" in low or "add" in low:
+            return "add_another", True
+        return None, False
+
     parsed = parse_dict_from_text(user_input)
     if parsed is not None and isinstance(parsed, dict):
         if field_name in ("init_params", "parameters", "variables", "layers", "forward", "loss_formula"):

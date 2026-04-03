@@ -11,7 +11,7 @@ LAYERS_NAME = "What is the **name** for this layer? (e.g. gru_basic, fc)"
 LAYERS_SPEC = (
     "What is the **layer spec**? Provide the type and param names as a tuple, "
     "e.g. `('gru', 'input_dim', 'hidden_dim', 'num_layers', 'dropout')` for a GRU layer, "
-    "or ('linear',  'hidden_dim',  1) for a linear layer with 1 output dimension."
+    "or '('linear',  'hidden_dim',  1)` for a linear layer with 1 output dimension."
 )
 LAYERS_CONTINUE = (
     "Layer added. Choose:\n"
@@ -59,6 +59,31 @@ QUESTION_FOR_FIELD = {
     },
 }
 
+# Loss function (step-by-step)
+LOSS_FN_VAR_INTRO = (
+    "**Step 1 — Variable definitions**\n"
+    "Define variables used in the loss (inputs, predictions, ground truth). You will add one variable at a time.\n"
+    "Each variable needs: **name**, **type** (input / prediction / ground_truth), **index** (integer), "
+    "**reverse normalization** (yes/no).\n\n"
+    "Reply with **Start defining variables** or use the button to begin."
+)
+LOSS_FN_VARIABLE = (
+    "Provide one variable (comma-separated):\n"
+    "`name=A, type=input|prediction|ground_truth, index=0, reverse=yes|no`\n"
+    "Example: `name=A, type=input, index=0, reverse=yes`"
+)
+LOSS_FN_VAR_CONTINUE = (
+    "Variable recorded. Choose:\n"
+    "**Add another variable** — define another entry\n"
+    "**Proceed to loss function** — continue to loss terms (parameters & variables will be shown in preview)"
+)
+LOSS_FN_LOSS_TERM = "Enter the expression for **{term}** (e.g. `mean((C_pred - C_true)**2)`)."
+LOSS_FN_LOSS_CONTINUE = (
+    "Loss term saved. Choose:\n"
+    "**Add another loss term** — define loss2, loss3, …\n"
+    "**Finalize loss function** — combine into `loss = loss1 + loss2 + ...` and review"
+)
+
 CONFIRM_MESSAGE = "All required fields are filled. Review the preview below, then reply **yes** to generate the final code."
 CONFIRM_ASK = "Review the preview below. Reply **yes** to generate the configuration code, or describe any changes you'd like (e.g. key order, values)."
 
@@ -81,4 +106,14 @@ def get_question_for_field(script_type: str, field_name: str) -> str:
         return FORWARD_STEP
     if script_type == "model_structure" and field_name == "forward.continue":
         return FORWARD_CONTINUE
+    if script_type == "loss_function" and field_name == "loss_fn.var_intro":
+        return LOSS_FN_VAR_INTRO
+    if script_type == "loss_function" and field_name == "loss_fn.variable":
+        return LOSS_FN_VARIABLE
+    if script_type == "loss_function" and field_name == "loss_fn.var_continue":
+        return LOSS_FN_VAR_CONTINUE
+    if script_type == "loss_function" and field_name == "loss_fn.loss_term":
+        return LOSS_FN_LOSS_TERM.format(term="loss1")
+    if script_type == "loss_function" and field_name == "loss_fn.loss_continue":
+        return LOSS_FN_LOSS_CONTINUE
     return QUESTION_FOR_FIELD.get(script_type, {}).get(field_name, f"Please provide the value for **{field_name}**.")

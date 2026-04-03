@@ -20,6 +20,7 @@ def create_config_graph(llm: Any):
     builder.add_node("select_script_type", lambda s: nodes.select_script_type(s, llm=llm))
     builder.add_node("start_layers", lambda s: nodes.start_layers(s, llm=llm))
     builder.add_node("start_forward", lambda s: nodes.start_forward(s, llm=llm))
+    builder.add_node("start_loss_variables", lambda s: nodes.start_loss_variables(s, llm=llm))
     builder.add_node("extract", lambda s: nodes.extract(s, llm=llm))
     builder.add_node("decide_next", lambda s: nodes.decide_next(s, llm=llm))
     builder.add_node("ask_question", lambda s: nodes.ask_question(s, llm=llm))
@@ -40,12 +41,14 @@ def create_config_graph(llm: Any):
             "extract": "extract",
             "start_layers": "start_layers",
             "start_forward": "start_forward",
+            "start_loss_variables": "start_loss_variables",
             "decide_next": "decide_next",
         },
     )
 
     builder.add_edge("start_layers", END)
     builder.add_edge("start_forward", END)
+    builder.add_edge("start_loss_variables", END)
 
     # select_script_type already set output and current_field -> end
     builder.add_edge("select_script_type", END)

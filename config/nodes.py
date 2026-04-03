@@ -12,8 +12,14 @@ from .templates import (
     get_loss_function_template,
     get_next_missing_field,
 )
-from .prompts import get_question_for_field, CONFIRM_MESSAGE, CONFIRM_ASK
+from .prompts import (
+    get_question_for_field,
+    CONFIRM_MESSAGE,
+    CONFIRM_ASK,
+    LOSS_FN_LOSS_TERM,
+)
 from .extractor import extract_value_for_field, parse_dict_from_text
+from .loss_fn_helpers import apply_loss_variable, merge_loss_final
 
 
 def receive(state: ConfigAgentState, *, llm: Any = None) -> Dict[str, Any]:
@@ -43,7 +49,7 @@ def select_script_type(state: ConfigAgentState, *, llm: Any = None) -> Dict[str,
         }
     config = get_model_structure_template() if script_type == "model_structure" else get_loss_function_template()
     next_field = get_next_missing_field(script_type, config, state={})
-    return {
+    out = {
         "script_type": script_type,
         "config": config,
         "next_field": next_field,
@@ -55,7 +61,16 @@ def select_script_type(state: ConfigAgentState, *, llm: Any = None) -> Dict[str,
         "current_layer_name": None,
         "forward_phase": None,
         "forward_steps": [],
+        "loss_phase": None,
+        "loss_term_index": None,
     }
+    if script_type == "loss_function":
+        out["loss_phase"] = "var_intro"
+        out["loss_term_index"] = 1
+        out["next_field"] = "loss_fn.var_intro"
+        out["current_field"] = "loss_fn.var_intro"
+        out["output"] = get_question_for_field("loss_function", "loss_fn.var_intro")
+    return out
 
 
 def extract(state: ConfigAgentState, *, llm: Any = None) -> Dict[str, Any]:
@@ -68,7 +83,10 @@ def extract(state: ConfigAgentState, *, llm: Any = None) -> Dict[str, Any]:
         return {"current_field": None}
     value, ok = extract_value_for_field(user_input, current_field, script_type or "", llm)
     if not ok or value is None:
-        hint = "a number" if current_field and "init_params." in current_field else "a valid value (e.g. a Python dict)"
+        if current_field and "loss_fn." in (current_field or ""):
+            hint = "comma-separated fields, e.g. name=A, type=input, index=0, reverse=yes"
+        else:
+            hint = "a number" if current_field and "init_params." in current_field else "a valid value (e.g. a Python dict)"
         return {
             "output": f"I couldn't parse **{current_field}**. Please provide {hint}.",
             "current_field": current_field,
@@ -187,6 +205,99 @@ def extract(state: ConfigAgentState, *, llm: Any = None) -> Dict[str, Any]:
             "next_field": "forward.step",
             "forward_phase": "step",
             "output": get_question_for_field(script_type, "forward.step"),
+        }
+    # --- Loss function (phased: variables -> loss terms) ---
+    if current_field == "loss_fn.variable" and script_type == "loss_function":
+        d = value if isinstance(value, dict) else {}
+        params, variables = apply_loss_variable(
+            config,
+            d.get("name"),
+            d.get("type"),
+            d.get("index"),
+            d.get("reverse", False),
+        )
+        config["parameters"] = params
+        config["variables"] = variables
+        return {
+            "config": config,
+            "current_field": "loss_fn.var_continue",
+            "next_field": "loss_fn.var_continue",
+            "loss_phase": "var_continue",
+            "output": get_question_for_field("loss_function", "loss_fn.var_continue"),
+        }
+    if current_field == "loss_fn.var_continue" and script_type == "loss_function":
+        if value == "proceed":
+            partial = copy.deepcopy(config)
+            partial["loss_formula"] = {}
+            preview_body = format_config_ordered(partial, "loss_function", "lossfn_config")
+            preview_intro = (
+                "**Step 3 — Loss function construction**\n\n"
+                "**Preview** (parameters & variables; loss_formula will be filled next):\n"
+                f"```python\n{preview_body}\n```\n"
+            )
+            idx = state.get("loss_term_index") or 1
+            term_key = f"loss{idx}"
+            out_msg = preview_intro + "\n" + LOSS_FN_LOSS_TERM.format(term=term_key)
+            return {
+                "config": config,
+                "current_field": "loss_fn.loss_term",
+                "next_field": "loss_fn.loss_term",
+                "loss_phase": "loss_term",
+                "output": out_msg,
+            }
+        return {
+            "current_field": "loss_fn.variable",
+            "next_field": "loss_fn.variable",
+            "loss_phase": "var",
+            "output": get_question_for_field("loss_function", "loss_fn.variable"),
+        }
+    if current_field == "loss_fn.loss_term" and script_type == "loss_function":
+        lf = dict(config.get("loss_formula") or {})
+        idx = state.get("loss_term_index") or 1
+        term_key = f"loss{idx}"
+        is_final = False
+        if isinstance(value, dict):
+            expr = value.get("expr", "")
+            if value.get("key"):
+                term_key = value["key"].strip()
+            is_final = bool(value.get("is_final"))
+        else:
+            expr = str(value).strip()
+        if not expr:
+            return {"output": "Please provide a non-empty expression.", "current_field": current_field}
+        lf[term_key] = expr
+        if is_final:
+            lf["loss"] = term_key
+        config["loss_formula"] = lf
+        next_idx = idx + 1
+        return {
+            "config": config,
+            "current_field": "loss_fn.loss_continue",
+            "next_field": "loss_fn.loss_continue",
+            "loss_phase": "loss_continue",
+            "loss_term_index": next_idx,
+            "output": get_question_for_field("loss_function", "loss_fn.loss_continue"),
+        }
+    if current_field == "loss_fn.loss_continue" and script_type == "loss_function":
+        if value == "finalize":
+            lf = merge_loss_final(dict(config.get("loss_formula") or {}))
+            config["loss_formula"] = lf
+            return {
+                "config": config,
+                "loss_phase": "done",
+                "current_field": None,
+                "next_field": None,
+                "complete": True,
+                "needs_confirmation": True,
+                "output": get_confirm_message_with_preview(config, script_type, CONFIRM_MESSAGE),
+            }
+        idx = state.get("loss_term_index") or 2
+        term_key = f"loss{idx}"
+        return {
+            "current_field": "loss_fn.loss_term",
+            "next_field": "loss_fn.loss_term",
+            "loss_phase": "loss_term",
+            "output": LOSS_FN_LOSS_TERM.format(term=term_key),
         }
     if current_field in ("init_params", "parameters", "variables", "layers", "forward", "loss_formula"):
         if isinstance(value, dict):
@@ -451,6 +562,20 @@ _INIT_PARAMS_ORDER = ["input_dim", "hidden_dim", "num_layers", "output_dim", "dr
 _LOSSFN_TOP_ORDER = ["parameters", "variables", "loss_formula"]
 
 
+def _loss_formula_key_order(d: Dict[str, Any]) -> list:
+    """Order loss1, loss2, … then other keys, then loss."""
+    keys = list(d.keys())
+    numbered = sorted(
+        [k for k in keys if k.startswith("loss") and k != "loss" and len(k) > 4 and k[4:].isdigit()],
+        key=lambda k: int(k[4:]),
+    )
+    rest = [k for k in keys if k not in numbered and k != "loss"]
+    out = numbered + rest
+    if "loss" in keys:
+        out.append("loss")
+    return out
+
+
 def _format_value_ordered(v: Any, key_order: list = None, indent: int = 2) -> str:
     """Format value for Python display; dicts use key_order when provided; lists/tuples as tuple literal."""
     if isinstance(v, dict):
@@ -462,6 +587,8 @@ def _format_value_ordered(v: Any, key_order: list = None, indent: int = 2) -> st
             vv = v[k]
             if k == "init_params" and isinstance(vv, dict):
                 sub = _format_value_ordered(vv, _INIT_PARAMS_ORDER, indent + 2)
+            elif k == "loss_formula" and isinstance(vv, dict):
+                sub = _format_value_ordered(vv, _loss_formula_key_order(vv), indent + 2)
             else:
                 sub = _format_value_ordered(vv, None, indent + 2)
             parts.append(" " * indent + repr(k) + ": " + sub)
@@ -522,15 +649,31 @@ def start_forward(state: ConfigAgentState, *, llm: Any = None) -> Dict[str, Any]
     }
 
 
+def start_loss_variables(state: ConfigAgentState, *, llm: Any = None) -> Dict[str, Any]:
+    """User said 'Start defining variables'; begin collecting loss function variables."""
+    return {
+        "loss_phase": "var",
+        "loss_term_index": 1,
+        "current_field": "loss_fn.variable",
+        "next_field": "loss_fn.variable",
+        "output": get_question_for_field("loss_function", "loss_fn.variable"),
+    }
+
+
 def route_after_receive(state: ConfigAgentState) -> str:
     """Route from receive: select_script_type | confirm | extract | start_layers | start_forward | decide_next."""
     script_type = state.get("script_type")
     current_field = state.get("current_field")
     user_input = (state.get("user_input") or "").strip().lower()
-    # Allow starting over: "create a (new) model structure" or "create a (new) loss function" always re-initialize
-    if user_input and "model" in user_input and "structure" in user_input:
+    # Allow explicit starting over only for "create/new/want" intents.
+    # Do not reset on workflow actions like "Proceed to loss function".
+    if user_input and "model" in user_input and "structure" in user_input and any(
+        tok in user_input for tok in ("create", "new", "want")
+    ):
         return "select_script_type"
-    if user_input and "loss" in user_input and "function" in user_input:
+    if user_input and "loss" in user_input and "function" in user_input and any(
+        tok in user_input for tok in ("create", "new", "want")
+    ):
         return "select_script_type"
     if not script_type:
         return "select_script_type"
@@ -540,6 +683,8 @@ def route_after_receive(state: ConfigAgentState) -> str:
         return "start_layers"
     if current_field == "forward" and user_input and "start" in user_input and ("forward" in user_input or "building" in user_input):
         return "start_forward"
+    if current_field == "loss_fn.var_intro" and user_input and "start" in user_input and ("defin" in user_input or "variable" in user_input):
+        return "start_loss_variables"
     if current_field and user_input:
         return "extract"
     return "decide_next"

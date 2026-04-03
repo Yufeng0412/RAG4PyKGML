@@ -65,6 +65,21 @@ def get_next_missing_field(
     For layers/forward uses state (layers_phase, forward_phase) for step-by-step flow.
     """
     state = state or {}
+    # Loss function: phased flow (variables -> loss terms) takes precedence over empty-dict checks
+    if script_type == "loss_function":
+        lp = state.get("loss_phase")
+        if lp in (None, "var_intro"):
+            return "loss_fn.var_intro"
+        if lp == "var":
+            return "loss_fn.variable"
+        if lp == "var_continue":
+            return "loss_fn.var_continue"
+        if lp in ("loss_intro", "loss_term"):
+            return "loss_fn.loss_term"
+        if lp == "loss_continue":
+            return "loss_fn.loss_continue"
+        if lp in ("done", "finalized"):
+            return None
     required = get_required_fields(script_type)
     if not required:
         return None

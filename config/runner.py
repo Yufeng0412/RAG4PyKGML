@@ -51,6 +51,8 @@ def run_one_turn(
         "current_layer_name": state.get("current_layer_name"),
         "forward_phase": state.get("forward_phase"),
         "forward_steps": state.get("forward_steps", []),
+        "loss_phase": state.get("loss_phase"),
+        "loss_term_index": state.get("loss_term_index"),
     }
     result = graph.invoke(invoke_state)
     output = result.get("output", "")
