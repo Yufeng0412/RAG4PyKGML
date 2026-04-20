@@ -77,7 +77,7 @@ A **stateful, goal-driven agent** that guides users to fill PyKGML configuration
 
 ## Integration
 
-- **Server**: New endpoint (e.g. in agent_server_app or a small LangGraph server) that receives `{ "input": user_message, "state": graph_state }`, invokes the compiled graph with that state, returns `{ "output", "state", "complete", "generated_code" }`.
+- **Server**: New endpoint (e.g. in backend_server or a small LangGraph server) that receives `{ "input": user_message, "state": graph_state }`, invokes the compiled graph with that state, returns `{ "output", "state", "complete", "generated_code" }`.
 - **Frontend**: Same as current config bot: send last user message + previous state; display `output`; persist returned `state` for next turn.
 
 ## Out of Scope (for this folder)

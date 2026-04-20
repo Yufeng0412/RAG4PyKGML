@@ -8,6 +8,8 @@ from typing import Any, Dict
 
 from .state import ConfigAgentState
 from .templates import (
+    INIT_PARAM_SUBFIELDS,
+    _layers_valid,
     get_model_structure_template,
     get_loss_function_template,
     get_next_missing_field,
@@ -31,7 +33,15 @@ def receive(state: ConfigAgentState, *, llm: Any = None) -> Dict[str, Any]:
         user_input = last.get("content", str(last)) if isinstance(last, dict) else str(last)
     user_input = str(user_input).strip()
     if user_input:
-        messages.append({"role": "user", "content": user_input})
+        low = user_input.lower()
+        if low.startswith("__nav_start_over__"):
+            display = "Start over"
+        elif low.startswith("__nav_go_back__:"):
+            target = user_input.split(":", 1)[-1].strip()
+            display = f"Go back to: {target}"
+        else:
+            display = user_input
+        messages.append({"role": "user", "content": display})
     return {"messages": messages, "user_input": user_input}
 
 
@@ -660,11 +670,192 @@ def start_loss_variables(state: ConfigAgentState, *, llm: Any = None) -> Dict[st
     }
 
 
+def _next_loss_term_index_from_config(cfg: Dict[str, Any]) -> int:
+    """Next lossN key index (1-based) from existing loss_formula keys."""
+    lf = cfg.get("loss_formula") or {}
+    nums = []
+    for k in lf:
+        if k == "loss":
+            continue
+        if isinstance(k, str) and k.startswith("loss") and len(k) > 4 and k[4:].isdigit():
+            nums.append(int(k[4:]))
+    return max(nums) + 1 if nums else 1
+
+
+def nav_start_over(state: ConfigAgentState, *, llm: Any = None) -> Dict[str, Any]:
+    """Reset workflow to generator selection (no script type)."""
+    return {
+        "script_type": None,
+        "config": {},
+        "current_field": None,
+        "next_field": None,
+        "complete": False,
+        "needs_confirmation": False,
+        "generated_code": None,
+        "layers_phase": None,
+        "current_layer_name": None,
+        "forward_phase": None,
+        "forward_steps": [],
+        "forward_valid": None,
+        "loss_phase": None,
+        "loss_term_index": None,
+        "output": "Please choose: **I want to create a model structure** or **I want to create a loss function**.",
+    }
+
+
+def nav_go_back(state: ConfigAgentState, *, llm: Any = None) -> Dict[str, Any]:
+    """Jump to a prior step in the current script workflow."""
+    raw = (state.get("user_input") or "").strip()
+    low = raw.lower()
+    if not low.startswith("__nav_go_back__:"):
+        return {
+            "output": "Invalid go-back command.",
+        }
+    target = raw.split(":", 1)[1].strip().lower()
+    script_type = state.get("script_type")
+    if not script_type:
+        return {"output": "No active configuration workflow. Use **Create a new model structure** or **Create a new loss function** first."}
+
+    if script_type == "loss_function":
+        cfg = copy.deepcopy(state.get("config") or get_loss_function_template())
+        if target == "loss_step1":
+            cfg["loss_formula"] = {}
+            return {
+                "config": cfg,
+                "loss_phase": "var",
+                "loss_term_index": 1,
+                "current_field": "loss_fn.variable",
+                "next_field": "loss_fn.variable",
+                "complete": False,
+                "needs_confirmation": False,
+                "generated_code": None,
+                "output": "**Step 1 — Variable definitions**\n\n" + get_question_for_field("loss_function", "loss_fn.variable"),
+            }
+        if target == "loss_step2":
+            nxt = _next_loss_term_index_from_config(cfg)
+            partial = copy.deepcopy(cfg)
+            preview_body = format_config_ordered(partial, "loss_function", "lossfn_config")
+            preview_intro = (
+                "**Step 2 — Loss function construction**\n\n"
+                "**Preview** (current parameters, variables, and loss terms):\n"
+                f"```python\n{preview_body}\n```\n"
+            )
+            term_key = f"loss{nxt}"
+            return {
+                "config": cfg,
+                "loss_phase": "loss_term",
+                "loss_term_index": nxt,
+                "current_field": "loss_fn.loss_term",
+                "next_field": "loss_fn.loss_term",
+                "complete": False,
+                "needs_confirmation": False,
+                "generated_code": None,
+                "output": preview_intro + "\n" + LOSS_FN_LOSS_TERM.format(term=term_key),
+            }
+        return {
+            "output": f"Unknown loss workflow step: **{target}**. Use `loss_step1` or `loss_step2`.",
+        }
+
+    if script_type == "model_structure":
+        old = state.get("config") or {}
+        if target == "model_init":
+            cfg = get_model_structure_template()
+            ip = old.get("init_params")
+            if isinstance(ip, dict):
+                cfg["init_params"] = copy.deepcopy(ip)
+            else:
+                cfg["init_params"] = {}
+            cfg["layers"] = {}
+            cfg["forward"] = {}
+            subf = None
+            init_d = cfg.get("init_params") or {}
+            for k in INIT_PARAM_SUBFIELDS:
+                if k not in init_d or init_d[k] is None:
+                    subf = k
+                    break
+            if subf is None:
+                subf = "input_dim"
+            cur = f"init_params.{subf}"
+            return {
+                "config": cfg,
+                "layers_phase": None,
+                "current_layer_name": None,
+                "forward_phase": None,
+                "forward_steps": [],
+                "current_field": cur,
+                "next_field": cur,
+                "complete": False,
+                "needs_confirmation": False,
+                "generated_code": None,
+                "output": "**Step 1 — Initial parameters**\n\n" + get_question_for_field("model_structure", cur),
+            }
+        if target == "model_layers":
+            cfg = copy.deepcopy(old) if old else get_model_structure_template()
+            if not isinstance(cfg.get("init_params"), dict):
+                cfg["init_params"] = {}
+            cfg["forward"] = {}
+            layers = cfg.get("layers") or {}
+            if _layers_valid(layers):
+                return {
+                    "config": cfg,
+                    "forward_steps": [],
+                    "forward_phase": None,
+                    "current_field": "layers.continue",
+                    "next_field": "layers.continue",
+                    "layers_phase": "continue",
+                    "current_layer_name": None,
+                    "complete": False,
+                    "needs_confirmation": False,
+                    "generated_code": None,
+                    "output": "**Step 2 — Layers**\n\n" + get_question_for_field("model_structure", "layers.continue"),
+                }
+            return {
+                "config": cfg,
+                "forward_steps": [],
+                "forward_phase": None,
+                "current_field": "layers",
+                "next_field": "layers",
+                "layers_phase": None,
+                "current_layer_name": None,
+                "complete": False,
+                "needs_confirmation": False,
+                "generated_code": None,
+                "output": "**Step 2 — Layers**\n\n" + get_question_for_field("model_structure", "layers"),
+            }
+        if target == "model_forward":
+            cfg = copy.deepcopy(old) if old else get_model_structure_template()
+            if not isinstance(cfg.get("init_params"), dict):
+                cfg["init_params"] = {}
+            if not isinstance(cfg.get("layers"), dict):
+                cfg["layers"] = {}
+            cfg["forward"] = {}
+            return {
+                "config": cfg,
+                "forward_steps": [],
+                "forward_phase": "step",
+                "current_field": "forward.step",
+                "next_field": "forward.step",
+                "complete": False,
+                "needs_confirmation": False,
+                "generated_code": None,
+                "output": "**Step 3 — Forward function**\n\n" + get_question_for_field("model_structure", "forward.step"),
+            }
+        return {
+            "output": f"Unknown model workflow step: **{target}**. Use `model_init`, `model_layers`, or `model_forward`.",
+        }
+
+    return {"output": "Navigation is not available for this workflow."}
+
+
 def route_after_receive(state: ConfigAgentState) -> str:
     """Route from receive: select_script_type | confirm | extract | start_layers | start_forward | decide_next."""
     script_type = state.get("script_type")
     current_field = state.get("current_field")
     user_input = (state.get("user_input") or "").strip().lower()
+    if user_input.startswith("__nav_start_over__"):
+        return "nav_start_over"
+    if user_input.startswith("__nav_go_back__:"):
+        return "nav_go_back"
     # Allow explicit starting over only for "create/new/want" intents.
     # Do not reset on workflow actions like "Proceed to loss function".
     if user_input and "model" in user_input and "structure" in user_input and any(

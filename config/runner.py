@@ -2,7 +2,7 @@
 One-turn runner for the LangGraph config agent.
 
 This module is not used inside the config_LangGraph package; it is intended for
-the server (e.g. agent_server_app.py) or any script that wants to run one
+the server (e.g. backend_server.py) or any script that wants to run one
 user turn and get back a server-friendly result: output, state, complete, generated_code.
 
 Usage:
@@ -53,6 +53,7 @@ def run_one_turn(
         "forward_steps": state.get("forward_steps", []),
         "loss_phase": state.get("loss_phase"),
         "loss_term_index": state.get("loss_term_index"),
+        "forward_valid": state.get("forward_valid"),
     }
     result = graph.invoke(invoke_state)
     output = result.get("output", "")

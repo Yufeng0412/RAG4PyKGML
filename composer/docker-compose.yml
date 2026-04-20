@@ -1,0 +1,16 @@
+services:
+  chatbot:
+    build:
+      context: ..
+      dockerfile: composer/Dockerfile
+    image: chatbot-app
+    ports:
+      - "7860:7860"
+    environment:
+      # Set this in your shell or .env file before starting.
+      NVIDIA_NIM_API_KEY: ${NVIDIA_NIM_API_KEY:-}
+      # Optional override if you use NVIDIA_API_KEY directly.
+      NVIDIA_API_KEY: ${NVIDIA_API_KEY:-}
+      PORT: 7860
+      BACKEND_PORT: 9012
+    restart: unless-stopped

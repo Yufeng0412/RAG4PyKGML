@@ -1,0 +1,5 @@
+-r frontend/requirements.txt
+-r config_LangGraph/requirements.txt
+langchain-nvidia-ai-endpoints==0.3.9
+uvicorn==0.32.0
+sse-starlette==2.1.3

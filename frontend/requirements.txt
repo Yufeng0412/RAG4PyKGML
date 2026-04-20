@@ -1,0 +1,17 @@
+## Runtime only — inference, FAISS retrieval, LangServe, Gradio UI.
+## Excludes: PDF/arxiv ingestion, pandas/flask-sse stack (unused by app code).
+
+## LangChain / LangServe
+langserve==0.3.1
+langchain==0.3.4
+langchain-text-splitters==0.3.8
+langchain_community==0.3.3
+openai==1.52.1
+
+## Vector store (prebuilt index loaded at runtime)
+faiss-cpu==1.9.0
+
+## Gradio + API
+gradio==5.36.2
+fastapi==0.115.3
+pydantic==2.10.6

@@ -56,11 +56,12 @@ def output_puller(inputs):
             yield token.get('output')
 
 ## Necessary Endpoints
+backend_base_url = os.getenv("BACKEND_BASE_URL", "http://localhost:9012").rstrip("/")
 chains_dict = {
-    'basic' : RemoteRunnable("http://localhost:9012/basic_chat/"),
-    'retriever' : RemoteRunnable("http://localhost:9012/retriever/"),
-    'generator' : RemoteRunnable("http://localhost:9012/generator/"),
-    'config_generator' : RemoteRunnable("http://localhost:9012/config_generator/"),
+    'basic' : RemoteRunnable(f"{backend_base_url}/basic_chat/"),
+    'retriever' : RemoteRunnable(f"{backend_base_url}/retriever/"),
+    'generator' : RemoteRunnable(f"{backend_base_url}/generator/"),
+    'config_generator' : RemoteRunnable(f"{backend_base_url}/config_generator/"),
 }
 
 # basic_chain = (RunnableLambda(lambda x: x[-1]) | chains_dict['basic'])
@@ -193,26 +194,70 @@ def _show_init_params_form(state):
 
 
 def _visibility_from_state(state):
-    """From config state, return (show_init, show_layers_start, show_layers_continue, show_forward_start, show_forward_continue)."""
+    """From config state, return visibility flags for model-structure and loss-function UI rows."""
     if not isinstance(state, dict):
-        return False, False, False, False, False
+        return (False,) * 11
     cur = (state.get("current_field") or "").strip()
     nxt = (state.get("next_field") or "").strip()
+    st = state.get("script_type")
     show_init = _show_init_params_form(state)
     show_layers_start = (cur == "layers" or nxt == "layers") and not (cur.startswith("layers.") or nxt.startswith("layers."))
     show_layers_continue = cur == "layers.continue" or nxt == "layers.continue"
     show_forward_start = (cur == "forward" or nxt == "forward") and not (cur.startswith("forward.") or nxt.startswith("forward."))
     show_forward_continue = cur == "forward.continue" or nxt == "forward.continue"
-    return show_init, show_layers_start, show_layers_continue, show_forward_start, show_forward_continue
+    show_loss_start = False
+    show_loss_var = False
+    show_loss_var_cont = False
+    show_loss_term_entry = False
+    show_loss_term_cont = False
+    if st == "loss_function":
+        show_loss_start = cur == "loss_fn.var_intro" or nxt == "loss_fn.var_intro"
+        show_loss_var = cur == "loss_fn.variable" or nxt == "loss_fn.variable"
+        show_loss_var_cont = cur == "loss_fn.var_continue" or nxt == "loss_fn.var_continue"
+        show_loss_term_entry = cur == "loss_fn.loss_term" or nxt == "loss_fn.loss_term"
+        show_loss_term_cont = cur == "loss_fn.loss_continue" or nxt == "loss_fn.loss_continue"
+    return (
+        show_init, show_layers_start, show_layers_continue, show_forward_start, show_forward_continue,
+        show_loss_start, show_loss_var, show_loss_var_cont, show_loss_term_entry, show_loss_term_entry,
+        show_loss_term_cont,
+    )
 
 
-def _update_stage_visibility(state):
-    """Return gr.update(visible=...) for init_params row, init inputs row, layers start, layers continue, forward start, forward continue."""
-    a, b, c, d, e = _visibility_from_state(state)
+# Maps dropdown labels to backend __nav_go_back__: targets
+_NAV_GO_BACK_LABEL_TO_TARGET = {
+    "Step 1 — Define variables": "loss_step1",
+    "Step 2 — Define loss functions": "loss_step2",
+    "Step 1 — Initial parameters": "model_init",
+    "Step 2 — Layers": "model_layers",
+    "Step 3 — Forward function": "model_forward",
+}
+
+
+def _update_stage_and_nav(state):
+    """Stage row visibility + navigation row + go-back dropdown choices."""
+    vis = _visibility_from_state(state)
+    a, b, c, d, e, ls, lv, lvc, lte, lte2, ltc = vis
+    st = state if isinstance(state, dict) else {}
+    script_type = st.get("script_type")
+    show_nav = bool(script_type)
+    if script_type == "loss_function":
+        nav_choices = ["Step 1 — Define variables", "Step 2 — Define loss functions"]
+    elif script_type == "model_structure":
+        nav_choices = [
+            "Step 1 — Initial parameters",
+            "Step 2 — Layers",
+            "Step 3 — Forward function",
+        ]
+    else:
+        nav_choices = []
     return (
         gr.update(visible=a), gr.update(visible=a),
         gr.update(visible=b), gr.update(visible=c),
         gr.update(visible=d), gr.update(visible=e),
+        gr.update(visible=ls), gr.update(visible=lv), gr.update(visible=lvc),
+        gr.update(visible=lte), gr.update(visible=lte2), gr.update(visible=ltc),
+        gr.update(visible=show_nav),
+        gr.update(choices=nav_choices, value=None, interactive=bool(nav_choices)),
     )
 
 
@@ -259,6 +304,124 @@ def config_bot(history, config_state):
             history.append({"role": "assistant", "content": err})
         else:
             history[-1]["content"] = err
+        return history, config_state
+
+
+def submit_loss_variable_form(history, config_state, name, vtype, index, reverse):
+    """Build loss variable line and send to config agent."""
+    config_state = config_state if isinstance(config_state, dict) else {}
+    n = (name or "").strip()
+    t = (vtype or "").strip()
+    if not n or not t:
+        return history, config_state
+    try:
+        idx = int(index) if index is not None else 0
+    except (TypeError, ValueError):
+        idx = 0
+    rev = (reverse or "").strip().lower() in ("yes", "y", "true", "1", "on")
+    user_msg = f"name={n}, type={t}, index={idx}, reverse={'yes' if rev else 'no'}"
+    history = history + [{"role": "user", "content": user_msg}]
+    input_data = {"input": user_msg, "state": config_state}
+    try:
+        result = chains_dict["config_generator"].invoke(input_data)
+        if not isinstance(result, dict):
+            history.append({"role": "assistant", "content": str(result)})
+            return history, config_state
+        if "state" in result:
+            config_state = dict(result["state"])
+        history.append({"role": "assistant", "content": result.get("output", "")})
+        return history, config_state
+    except Exception as e:
+        logger.error(f"Config generator error: {get_traceback(e)}")
+        history.append({"role": "assistant", "content": f"⚠️ Error: {str(e)}"})
+        return history, config_state
+
+
+def submit_loss_term_form(history, config_state, loss_name, expression, is_final_loss):
+    """Build loss equation line (loss_k = expr) and send to config agent."""
+    config_state = config_state if isinstance(config_state, dict) else {}
+    lhs = (loss_name or "").strip()
+    rhs = (expression or "").strip()
+    if not rhs:
+        return history, config_state
+    user_msg = f"name={lhs} || expr={rhs} || final={'yes' if is_final_loss else 'no'}"
+    history = history + [{"role": "user", "content": user_msg}]
+    input_data = {"input": user_msg, "state": config_state}
+    try:
+        result = chains_dict["config_generator"].invoke(input_data)
+        if not isinstance(result, dict):
+            history.append({"role": "assistant", "content": str(result)})
+            return history, config_state
+        if "state" in result:
+            config_state = dict(result["state"])
+        history.append({"role": "assistant", "content": result.get("output", "")})
+        return history, config_state
+    except Exception as e:
+        logger.error(f"Config generator error: {get_traceback(e)}")
+        history.append({"role": "assistant", "content": f"⚠️ Error: {str(e)}"})
+        return history, config_state
+
+
+def submit_nav_start_over(history, config_state):
+    """Reset config workflow to generator selection (internal command, friendly chat labels)."""
+    config_state = config_state if isinstance(config_state, dict) else {}
+    input_data = {"input": "__nav_start_over__", "state": config_state}
+    try:
+        result = chains_dict["config_generator"].invoke(input_data)
+        if not isinstance(result, dict):
+            history = history + [
+                {"role": "user", "content": "Start over"},
+                {"role": "assistant", "content": str(result)},
+            ]
+            return history, config_state
+        if "state" in result:
+            config_state = dict(result["state"])
+        out = result.get("output", "")
+        history = history + [
+            {"role": "user", "content": "Start over"},
+            {"role": "assistant", "content": out},
+        ]
+        return history, config_state
+    except Exception as e:
+        logger.error(f"Config generator error: {get_traceback(e)}")
+        history = history + [
+            {"role": "user", "content": "Start over"},
+            {"role": "assistant", "content": f"⚠️ Error: {str(e)}"},
+        ]
+        return history, config_state
+
+
+def submit_nav_go_back(history, config_state, selection):
+    """Jump to a prior step in the current workflow."""
+    config_state = config_state if isinstance(config_state, dict) else {}
+    if not selection:
+        return history, config_state
+    target = _NAV_GO_BACK_LABEL_TO_TARGET.get(selection)
+    if not target:
+        return history, config_state
+    input_data = {"input": f"__nav_go_back__:{target}", "state": config_state}
+    try:
+        result = chains_dict["config_generator"].invoke(input_data)
+        if not isinstance(result, dict):
+            history = history + [
+                {"role": "user", "content": f"Go back to: {selection}"},
+                {"role": "assistant", "content": str(result)},
+            ]
+            return history, config_state
+        if "state" in result:
+            config_state = dict(result["state"])
+        out = result.get("output", "")
+        history = history + [
+            {"role": "user", "content": f"Go back to: {selection}"},
+            {"role": "assistant", "content": out},
+        ]
+        return history, config_state
+    except Exception as e:
+        logger.error(f"Config generator error: {get_traceback(e)}")
+        history = history + [
+            {"role": "user", "content": f"Go back to: {selection}"},
+            {"role": "assistant", "content": f"⚠️ Error: {str(e)}"},
+        ]
         return history, config_state
 
 
@@ -397,6 +560,7 @@ def get_demo():
                     label="RAG Chatbot",
                     avatar_images=(None, (os.path.join(os.path.dirname(__file__), "parrot.png"))),
                     height=500,
+                    type="messages",
                 )
                 rag_txt = gr.Textbox(
                     show_label=False,
@@ -429,16 +593,17 @@ def get_demo():
                     label="Config Generator",
                     avatar_images=(None, (os.path.join(os.path.dirname(__file__), "parrot.png"))),
                     height=380,
+                    type="messages",
                 )
                 # Step-by-step init_params form (visible when agent asks for init_params)
                 with gr.Row(visible=False) as init_params_row:
                     gr.Markdown("**Initial parameters** (fill any subset and submit):")
                 with gr.Row(visible=False) as init_params_inputs_row:
                     input_dim_in = gr.Number(label="input_dim", value=None, precision=0, min_width=80)
-                    hidden_dim_in = gr.Number(label="hidden_dim", value=None, precision=0, min_width=80)
-                    num_layers_in = gr.Number(label="num_layers", value=None, precision=0, min_width=80)
+                    hidden_dim_in = gr.Number(label="hidden_dim", value=64, precision=0, min_width=80)
+                    num_layers_in = gr.Number(label="num_layers", value=1, precision=0, min_width=80)
                     output_dim_in = gr.Number(label="output_dim", value=None, precision=0, min_width=80)
-                    dropout_in = gr.Number(label="dropout", value=None, precision=2, min_width=80)
+                    dropout_in = gr.Number(label="dropout", value=0.2, precision=2, min_width=80)
                     btn_submit_init = gr.Button("Submit init params", variant="primary")
                 # Stage 2: Layers — Start / Continue / Complete
                 with gr.Row(visible=False) as layers_start_row:
@@ -452,14 +617,60 @@ def get_demo():
                 with gr.Row(visible=False) as forward_continue_row:
                     btn_continue_forward = gr.Button("Continue Adding Layer Calls", variant="secondary")
                     btn_complete_forward = gr.Button("Complete", variant="primary")
+                # Loss function — variables & loss terms
+                with gr.Row(visible=False) as loss_start_row:
+                    btn_start_loss_vars = gr.Button("Start defining variables", variant="primary")
+                with gr.Row(visible=False) as loss_var_row:
+                    gr.Markdown("**Loss variable** (one at a time):")
+                    loss_var_name = gr.Textbox(label="Name", placeholder="A", scale=1)
+                    loss_var_type = gr.Textbox(label="Type", placeholder="input | prediction | ground_truth", scale=2)
+                    loss_var_index = gr.Number(label="Index", value=0, precision=0, scale=1)
+                    loss_var_reverse = gr.Textbox(label="Reverse norm", placeholder="yes | no", scale=1)
+                    btn_submit_loss_var = gr.Button("Submit variable", variant="primary", scale=1)
+                with gr.Row(visible=False) as loss_var_continue_row:
+                    btn_loss_var_add = gr.Button("Add another variable", variant="secondary")
+                    btn_loss_var_proceed = gr.Button("Proceed to loss function", variant="primary")
+                with gr.Row(visible=False) as loss_term_entry_row:
+                    loss_term_name = gr.Textbox(label="Loss term name", placeholder="loss1", scale=1)
+                    gr.Markdown("## =")
+                    loss_term_expr = gr.Textbox(
+                        label="Expression",
+                        placeholder="mean((C_pred - C_true)**2)",
+                        scale=3,
+                    )
+                    btn_submit_loss_term = gr.Button("Submit loss equation", variant="primary", scale=1)
+                with gr.Row(visible=False) as loss_term_final_row:
+                    loss_term_is_final = gr.Checkbox(
+                        label="Use this as final loss",
+                        value=False,
+                    )
+                with gr.Row(visible=False) as loss_loss_continue_row:
+                    btn_loss_term_add = gr.Button("Add another loss term", variant="secondary")
+                    btn_loss_term_finalize = gr.Button("Finalize loss function", variant="primary")
                 config_state = gr.State(value={})  # Persist config agent state across requests
                 config_txt = gr.Textbox(
                     show_label=False,
                     placeholder="Or type your choice / answer the bot's questions here...",
                     container=False,
                 )
+                with gr.Row(visible=False) as nav_row:
+                    btn_nav_start_over = gr.Button("Start Over", variant="secondary")
+                    nav_go_back_dd = gr.Dropdown(
+                        label="Go back to…",
+                        choices=[],
+                        interactive=False,
+                        scale=4,
+                    )
+                    btn_nav_go_back = gr.Button("Go", variant="secondary", scale=1)
 
-                stage_rows = [init_params_row, init_params_inputs_row, layers_start_row, layers_continue_row, forward_start_row, forward_continue_row]
+                stage_rows = [
+                    init_params_row, init_params_inputs_row,
+                    layers_start_row, layers_continue_row, forward_start_row, forward_continue_row,
+                    loss_start_row, loss_var_row, loss_var_continue_row,
+                    loss_term_entry_row, loss_term_final_row, loss_loss_continue_row,
+                    nav_row,
+                ]
+                stage_and_nav_outputs = stage_rows + [nav_go_back_dd]
 
                 btn_model.click(
                     fn=lambda h: (h + [{"role": "user", "content": "I want to create a model structure"}], ""),
@@ -469,9 +680,9 @@ def get_demo():
                 ).then(
                     config_bot, [config_chatbot, config_state], [config_chatbot, config_state]
                 ).then(
-                    _update_stage_visibility,
+                    _update_stage_and_nav,
                     [config_state],
-                    stage_rows,
+                    stage_and_nav_outputs,
                 )
 
                 btn_loss.click(
@@ -480,9 +691,9 @@ def get_demo():
                     outputs=[config_chatbot, config_txt],
                     queue=False,
                 ).then(config_bot, [config_chatbot, config_state], [config_chatbot, config_state]).then(
-                    _update_stage_visibility,
+                    _update_stage_and_nav,
                     [config_state],
-                    stage_rows,
+                    stage_and_nav_outputs,
                 )
 
                 # Config generator chatbot event handlers (text submit)
@@ -494,7 +705,7 @@ def get_demo():
                         queue=False
                     )
                     .then(config_bot, [config_chatbot, config_state], [config_chatbot, config_state])
-                    .then(_update_stage_visibility, [config_state], stage_rows)
+                    .then(_update_stage_and_nav, [config_state], stage_and_nav_outputs)
                     .then(lambda: gr.Textbox(interactive=True), None, [config_txt], queue=False)
                 )
 
@@ -506,7 +717,37 @@ def get_demo():
                         input_dim_in, hidden_dim_in, num_layers_in, output_dim_in, dropout_in,
                     ],
                     outputs=[config_chatbot, config_state],
-                ).then(_update_stage_visibility, [config_state], stage_rows)
+                ).then(_update_stage_and_nav, [config_state], stage_and_nav_outputs)
+
+                btn_submit_loss_var.click(
+                    fn=submit_loss_variable_form,
+                    inputs=[
+                        config_chatbot, config_state,
+                        loss_var_name, loss_var_type, loss_var_index, loss_var_reverse,
+                    ],
+                    outputs=[config_chatbot, config_state],
+                ).then(_update_stage_and_nav, [config_state], stage_and_nav_outputs)
+
+                btn_submit_loss_term.click(
+                    fn=submit_loss_term_form,
+                    inputs=[
+                        config_chatbot, config_state,
+                        loss_term_name, loss_term_expr, loss_term_is_final,
+                    ],
+                    outputs=[config_chatbot, config_state],
+                ).then(_update_stage_and_nav, [config_state], stage_and_nav_outputs)
+
+                btn_nav_start_over.click(
+                    fn=submit_nav_start_over,
+                    inputs=[config_chatbot, config_state],
+                    outputs=[config_chatbot, config_state],
+                ).then(_update_stage_and_nav, [config_state], stage_and_nav_outputs)
+
+                btn_nav_go_back.click(
+                    fn=submit_nav_go_back,
+                    inputs=[config_chatbot, config_state, nav_go_back_dd],
+                    outputs=[config_chatbot, config_state],
+                ).then(_update_stage_and_nav, [config_state], stage_and_nav_outputs)
 
                 # Stage 2 & 3: Layers / Forward button clicks — add user message and run config_bot
                 for btn, msg in [
@@ -516,6 +757,11 @@ def get_demo():
                     (btn_start_forward, "Start Building Forward Function"),
                     (btn_continue_forward, "Continue Adding Layer Calls"),
                     (btn_complete_forward, "Complete"),
+                    (btn_start_loss_vars, "Start defining variables"),
+                    (btn_loss_var_add, "Add another variable"),
+                    (btn_loss_var_proceed, "Proceed to loss function"),
+                    (btn_loss_term_add, "Add another loss term"),
+                    (btn_loss_term_finalize, "Finalize loss function"),
                 ]:
                     btn.click(
                         fn=lambda h, s, m=msg: (h + [{"role": "user", "content": m}], s),
@@ -523,7 +769,7 @@ def get_demo():
                         outputs=[config_chatbot, config_state],
                         queue=False,
                     ).then(config_bot, [config_chatbot, config_state], [config_chatbot, config_state]).then(
-                        _update_stage_visibility, [config_state], stage_rows
+                        _update_stage_and_nav, [config_state], stage_and_nav_outputs
                     )
 
     return demo

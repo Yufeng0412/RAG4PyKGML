@@ -7,7 +7,7 @@ Usage (direct graph invoke):
     state = {"messages": [], "user_input": "I want to create a model structure"}
     result = graph.invoke(state)
 
-Usage (server-friendly one-turn runner; use this in agent_server_app or similar):
+Usage (server-friendly one-turn runner; use this in backend_server or similar):
     from config_LangGraph import create_config_graph, run_one_turn
     graph = create_config_graph(llm)
     result = run_one_turn(graph, user_message, previous_state)
