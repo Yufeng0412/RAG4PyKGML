@@ -2,6 +2,12 @@
 
 This guide shows how to package and distribute the chatbot as a prebuilt Docker image so end users can run it without source code.
 
+## Before you start
+
+- Install Docker: [Docker Desktop](https://www.docker.com/products/docker-desktop/) or the official setup docs at [Get Docker](https://docs.docker.com/get-docker/).
+- Docker command reference and guides: [Docker Docs](https://docs.docker.com/).
+- If you use Docker Desktop (macOS/Windows), make sure Docker Desktop is running before executing `docker` commands in your terminal.
+
 ## Source layout
 
 The image expects a runnable Gradio/FastAPI app in this folder, including at least:
