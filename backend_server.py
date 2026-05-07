@@ -56,7 +56,8 @@ chat_prompt = ChatPromptTemplate.from_messages([
 try:
     embedder = NVIDIAEmbeddings(model="nvidia/nv-embed-v1", truncate="END")
     # Allow runtime override and keep a broadly available default.
-    chat_model = os.getenv("NVIDIA_CHAT_MODEL", "meta/llama-3.1-8b-instruct")
+    # chat_model = os.getenv("NVIDIA_CHAT_MODEL", "meta/llama-3.1-8b-instruct")
+    chat_model = os.getenv("NVIDIA_CHAT_MODEL", "google/gemma-3-1b-it")
     instruct_llm = ChatNVIDIA(model=chat_model)
 
     basic_chat = (
