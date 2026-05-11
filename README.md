@@ -61,3 +61,6 @@ Open:
 - `config_LangGraph/README.md`
 - `PyKGML/README.md`
 - `chatbot/README_docker.md` (prebuilt image packaging and end-user run guide)
+
+## Acknowledgement
+This project development was supported by Prof. Licheng Liu (University of Wisconsin, Madison; [ECAI Lab](https://ecai.cals.wisc.edu/)), Prof. David Mulla (The University of Minnesota, Twin Cities; [AI-LEAF Institute](https://cse.umn.edu/aileaf)), and Prof. Ce Yang (The University of Minnesota, Twin Cities; [Agricultural Robotics Lab](https://yanglab.bbe.umn.edu/)).
